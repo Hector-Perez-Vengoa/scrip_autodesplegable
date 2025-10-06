@@ -6,10 +6,14 @@ set -euo pipefail
 ############################################
 REGION="us-east-1"
 
-# Nombre, Key Pair y Security Group existentes (según tu consigna)
-INSTANCE_NAME="dsn5c-lab07-gdiaz-ec2-www"
-KEY_NAME="dsn5c-lab07-gdiaz-kp-login"
-SG_NAME="dsn5a-lab07-gdiaz-sg-sshttps"   # Debe permitir al menos TCP 22 (opcional) y TCP 80
+# Nombre, Key Pair y Security Group existentes (ajusta a tus recursos)
+# Nota: para evitar valores hardcodeados, deja vacío para no usar.
+# Permitir override mediante variables de entorno. Ejemplo: export KEY_NAME="mi-key" antes de ejecutar.
+INSTANCE_NAME="${INSTANCE_NAME:-}"   # Opcional: Nombre para la etiqueta 'Name' de la instancia. Si vacío, no se etiquetará.
+KEY_NAME="${KEY_NAME:-}"        # Opcional: Key Pair name. Si vacío, no se pasará --key-name al lanzar la instancia.
+# Puedes especificar el Security Group por nombre (SG_NAME) o por ID (SG_ID_VALUE).
+SG_NAME="${SG_NAME:-}"         # Nombre del Security Group (opcional)
+SG_ID_VALUE="${SG_ID_VALUE:-}"     # ID del Security Group (opcional, ejemplo: sg-0abc1234)
 
 # Subdominios (ajusta a los que quieras usar)
 SUB1="gx06.asesoresti.net"
@@ -39,14 +43,23 @@ UBUNTU_AMI="$(aws ssm get-parameter \
   --query 'Parameter.Value' --output text)"
 echo "AMI: $UBUNTU_AMI"
 
-# Busca el Security Group ID por nombre
-echo "==> Buscando Security Group ID para '$SG_NAME'..."
-SG_ID="$(aws ec2 describe-security-groups --group-names "$SG_NAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)"
-if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
-  echo "ERROR: No se encontró el Security Group con nombre '$SG_NAME' en $REGION"
-  exit 1
+# Obtiene el Security Group ID: prioridad a SG_ID_VALUE, si no existe intenta buscar por nombre SG_NAME
+echo "==> Obteniendo Security Group ID..."
+if [[ -n "$SG_ID_VALUE" ]]; then
+  SG_ID="$SG_ID_VALUE"
+  echo "Usando SG_ID proporcionada: $SG_ID"
+else
+  if [[ -z "$SG_NAME" ]]; then
+    echo "ERROR: No se proporcionó SG_NAME ni SG_ID_VALUE. Define SG_NAME o SG_ID_VALUE en el script o exporta la variable."
+    exit 1
+  fi
+  SG_ID="$(aws ec2 describe-security-groups --group-names "$SG_NAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)"
+  if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
+    echo "ERROR: No se encontró el Security Group con nombre '$SG_NAME' en $REGION"
+    exit 1
+  fi
+  echo "SG_ID (resuelto desde nombre): $SG_ID"
 fi
-echo "SG_ID: $SG_ID"
 
 # Construye el script de User Data (cloud-init) para configurar Apache y VHosts
 echo "==> Generando user-data..."
@@ -127,14 +140,22 @@ else
 fi
 
 echo "==> Lanzando instancia EC2 Ubuntu con User Data para Apache+VHosts..."
+# Construir argumentos condicionales: --key-name y tag-specifications solo si se proveen
+EXTRA_RUN_ARGS=()
+if [[ -n "$KEY_NAME" ]]; then
+  EXTRA_RUN_ARGS+=(--key-name "$KEY_NAME")
+fi
+if [[ -n "$INSTANCE_NAME" ]]; then
+  EXTRA_RUN_ARGS+=(--tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}]")
+fi
+
 RUN_JSON="$(aws ec2 run-instances \
   --image-id "$UBUNTU_AMI" \
   --instance-type "$INSTANCE_TYPE" \
-  --key-name "$KEY_NAME" \
   --security-group-ids "$SG_ID" \
   "${EXTRA_NET_ARGS[@]}" \
+  "${EXTRA_RUN_ARGS[@]}" \
   --user-data "$USER_DATA" \
-  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}]" \
   --query 'Instances[0].{Id:InstanceId}' --output json)"
 
 INSTANCE_ID="$(echo "$RUN_JSON" | jq -r '.Id')"
@@ -154,7 +175,11 @@ echo "Public IP: $PUBLIC_IP"
 
 echo
 echo "======================================================="
-echo " La instancia '$INSTANCE_NAME' está lista."
+if [[ -n "$INSTANCE_NAME" ]]; then
+  echo " La instancia '$INSTANCE_NAME' está lista."
+else
+  echo " La instancia con ID $INSTANCE_ID está lista."
+fi
 echo " IP pública:  $PUBLIC_IP"
 echo " Subdominios: $SUB1  |  $SUB2"
 echo "======================================================="
